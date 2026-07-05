@@ -27,8 +27,8 @@
 #define RXTX_LOG_SLOT_COUNT          (RXTX_LOG_FLASH_SIZE / sizeof(RXTX_LogFlashEntry_t))
 #define RXTX_LOG_VIEW_CACHE_COUNT    7u
 #define RXTX_LOG_VIEW_SCAN_BUDGET    8u
-#define RXTX_LOG_VIEW_ANCHOR_STRIDE  16u
-#define RXTX_LOG_VIEW_ANCHOR_COUNT   ((RXTX_LOG_VISIBLE_COUNT + RXTX_LOG_VIEW_ANCHOR_STRIDE - 1u) / RXTX_LOG_VIEW_ANCHOR_STRIDE)
+#define RXTX_LOG_VIEW_ANCHOR_STRIDE  32u
+#define RXTX_LOG_VIEW_ANCHOR_COUNT   ((RXTX_LOG_SLOT_COUNT + RXTX_LOG_VIEW_ANCHOR_STRIDE - 1u) / RXTX_LOG_VIEW_ANCHOR_STRIDE)
 #define RXTX_LOG_ENTRY_COMMIT        0xA5u
 #define RXTX_LOG_CHANNEL_NONE        0xFFFFu
 #define RXTX_LOG_FLAG_TX             (1u << 0)
@@ -199,6 +199,8 @@ static uint16_t RXTX_LOG_NextSlot(uint16_t slot)
     return (uint16_t)(slot + 1u) >= RXTX_LOG_SLOT_COUNT ? 0 : (uint16_t)(slot + 1u);
 }
 
+static void RXTX_LOG_StartViewCacheScan(uint16_t start);
+
 static void RXTX_LOG_InvalidateViewAnchors(void)
 {
     gViewAnchorMask = 0;
@@ -304,10 +306,35 @@ static void RXTX_LOG_StepClear(void)
 
 static uint16_t RXTX_LOG_PageStart(uint16_t indexFromNewest)
 {
-    if (indexFromNewest >= RXTX_LOG_VISIBLE_COUNT)
-        indexFromNewest = RXTX_LOG_VISIBLE_COUNT - 1u;
+    if (indexFromNewest >= RXTX_LOG_SLOT_COUNT)
+        indexFromNewest = RXTX_LOG_SLOT_COUNT - 1u;
 
     return indexFromNewest;
+}
+
+static bool RXTX_LOG_AlignLastViewPage(void)
+{
+    if (gViewScanActive ||
+        !gViewCacheComplete ||
+        gViewCacheHasOlder ||
+        gViewCacheCount == 0)
+        return false;
+
+    if (gViewCacheCount >= RXTX_LOG_VIEW_CACHE_COUNT) {
+        if (gLogCursor == gViewCacheStart)
+            return false;
+        gLogCursor = gViewCacheStart;
+        return true;
+    }
+
+    const uint16_t missingRows = RXTX_LOG_VIEW_CACHE_COUNT - gViewCacheCount;
+    const uint16_t start = gViewCacheStart > missingRows ? (uint16_t)(gViewCacheStart - missingRows) : 0;
+    if (start == gViewCacheStart)
+        return false;
+
+    gLogCursor = start;
+    RXTX_LOG_StartViewCacheScan(start);
+    return true;
 }
 
 static void RXTX_LOG_StepViewCacheScan(void)
@@ -325,6 +352,12 @@ static void RXTX_LOG_StepViewCacheScan(void)
             !RXTX_LOG_MatchesFlags(flashEntry.flags))
             continue;
 
+        if (gViewScanTrafficIndex >= RXTX_LOG_VISIBLE_COUNT) {
+            gViewScanActive = false;
+            gViewCacheComplete = true;
+            break;
+        }
+
         const bool isTraffic = RXTX_LOG_IsTrafficFlags(flashEntry.flags);
         RXTX_LOG_RecordViewAnchor(gViewScanIndex, gViewScanSlot, gViewScanTrafficIndex);
 
@@ -336,32 +369,31 @@ static void RXTX_LOG_StepViewCacheScan(void)
             continue;
         }
 
-        if (gViewCacheCount >= RXTX_LOG_VIEW_CACHE_COUNT) {
+        if (gViewCacheCount < RXTX_LOG_VIEW_CACHE_COUNT) {
+            RXTX_LOG_CopyFromFlash(&gViewCache[gViewCacheCount], &flashEntry);
+            if (gViewCacheCount == 0)
+                gViewCacheTrafficIndex = gViewScanTrafficIndex;
+            gViewCacheCount++;
+        } else {
             gViewCacheHasOlder = true;
             gViewScanActive = false;
             gViewCacheComplete = true;
             break;
         }
 
-        RXTX_LOG_CopyFromFlash(&gViewCache[gViewCacheCount], &flashEntry);
-        if (gViewCacheCount == 0)
-            gViewCacheTrafficIndex = gViewScanTrafficIndex;
-        gViewCacheCount++;
         gViewScanIndex++;
         if (isTraffic)
             gViewScanTrafficIndex++;
-        if (gViewCacheCount >= RXTX_LOG_VIEW_CACHE_COUNT) {
-            gViewCacheHasOlder = (uint16_t)(gViewCacheStart + gViewCacheCount) < RXTX_LOG_VISIBLE_COUNT;
-            gViewScanActive = false;
-            gViewCacheComplete = true;
-            break;
-        }
     }
 
-    if (gViewScanScanned >= RXTX_LOG_SLOT_COUNT) {
+    if (gViewScanScanned >= RXTX_LOG_SLOT_COUNT ||
+        gViewScanTrafficIndex >= RXTX_LOG_VISIBLE_COUNT) {
         gViewScanActive = false;
         gViewCacheComplete = true;
     }
+
+    if (RXTX_LOG_AlignLastViewPage())
+        return;
 }
 
 static void RXTX_LOG_StartViewCacheScan(uint16_t start)
@@ -509,7 +541,7 @@ static void RXTX_LOG_EnsureViewCache(void)
 
 static bool RXTX_LOG_GetFilteredEntry(uint16_t indexFromNewest, RXTX_LogEntry_t *entry)
 {
-    if (indexFromNewest >= RXTX_LOG_VISIBLE_COUNT)
+    if (indexFromNewest >= RXTX_LOG_SLOT_COUNT)
         return false;
 
     if (!RXTX_LOG_ViewCacheCovers(indexFromNewest))
@@ -707,11 +739,16 @@ void RXTX_LOG_ProcessKeys(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
     case KEY_DOWN:
         RXTX_LOG_EnsureViewCache();
         if (gViewCacheCount > 0) {
+            if (gViewScanActive)
+                break;
+
+            if (gViewCacheComplete && !gViewCacheHasOlder)
+                break;
+
             const uint16_t next = gLogCursor + 1u;
             if (next < (uint16_t)(gViewCacheStart + gViewCacheCount)) {
                 gLogCursor = next;
-            } else if (gViewCacheHasOlder &&
-                       (uint16_t)(gViewCacheStart + gViewCacheCount) < RXTX_LOG_VISIBLE_COUNT) {
+            } else if (gViewCacheHasOlder) {
                 gLogCursor = gViewCacheStart + gViewCacheCount;
                 RXTX_LOG_StartViewCacheScan(gLogCursor);
             }

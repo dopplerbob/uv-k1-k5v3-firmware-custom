@@ -171,10 +171,6 @@ enable_feature(ENABLE_SCAN_RANGES)
 
 # ---- CONTRIB MODS ----
 
-# Thank you @markusb
-enable_feature(ENABLE_REGA
-    app/rega.c
-) 
 # Thank you @reppad
 enable_feature(ENABLE_EXTRA_UART_CMD)
 

@@ -18,7 +18,7 @@
 #define RXTX_LOG_VISIBLE_COUNT 512
 
 // Field order mirrors RXTX_LogFlashEntry_t (rxtx_log.c) so both layouts
-// match byte-for-byte up to and including flags, copied in one pass.
+// match byte-for-byte up to and including sMeter, copied in one pass.
 // The channel name is not stored: it is resolved from `channel` at display
 // time via SETTINGS_FetchChannelName.
 typedef struct {
@@ -28,6 +28,7 @@ typedef struct {
     uint16_t durationSeconds;
     uint16_t channel;
     uint8_t  flags;
+    uint8_t  sMeter;
 } RXTX_LogEntry_t;
 
 void RXTX_LOG_Init(void);

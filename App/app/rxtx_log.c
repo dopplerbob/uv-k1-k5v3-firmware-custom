@@ -12,6 +12,7 @@
 #include "app/generic.h"
 #include "app/rxtx_log.h"
 #include "audio.h"
+#include "driver/bk4819.h"
 #include "driver/py25q16.h"
 #include "driver/st7565.h"
 #include "external/printf/printf.h"
@@ -39,6 +40,7 @@
 #define RXTX_LOG_FILTER_ALL          0u
 #define RXTX_LOG_FILTER_RX           1u
 #define RXTX_LOG_FILTER_TX           2u
+#define RXTX_LOG_SMETER_UNKNOWN      0xFFu
 
 typedef struct __attribute__((packed)) {
     uint32_t sequence;
@@ -47,7 +49,8 @@ typedef struct __attribute__((packed)) {
     uint16_t durationSeconds;
     uint16_t channel;
     uint8_t  flags;
-    uint8_t  reserved[13];
+    uint8_t  sMeter;
+    uint8_t  reserved[12];
     uint8_t  crc;
     uint8_t  commit;
 } RXTX_LogFlashEntry_t;
@@ -59,7 +62,7 @@ static_assert(RXTX_LOG_VIEW_ANCHOR_COUNT <= 32);
 
 // RXTX_LogEntry_t (RAM) and RXTX_LogFlashEntry_t must stay byte-identical for
 // the copied prefix.
-static_assert(RXTX_LOG_ENTRY_COPY_SIZE == offsetof(RXTX_LogEntry_t, flags) + sizeof(((RXTX_LogEntry_t *)0)->flags));
+static_assert(RXTX_LOG_ENTRY_COPY_SIZE == offsetof(RXTX_LogEntry_t, sMeter) + sizeof(((RXTX_LogEntry_t *)0)->sMeter));
 static_assert(sizeof(RXTX_LogEntry_t) >= RXTX_LOG_ENTRY_COPY_SIZE);
 
 static RXTX_LogEntry_t gViewCache[RXTX_LOG_VIEW_CACHE_COUNT];
@@ -99,9 +102,11 @@ static uint8_t         gSessionFlags;
 static uint32_t        gSessionFrequency;
 static uint16_t        gSessionChannel;
 static uint16_t        gSessionTicks500ms;
+static uint8_t         gSessionSMeter;
 
 static uint16_t        gLogCursor;
 static uint8_t         gLogFilter;
+static bool            gLogShowRssi;
 
 static uint8_t RXTX_LOG_Crc8(const void *data, uint16_t size)
 {
@@ -174,6 +179,22 @@ const char *RXTX_LOG_GetFilterName(void)
     static const char *const filterNames[] = {"ALL", "RX", "TX"};
 
     return filterNames[gLogFilter];
+}
+
+static void RXTX_LOG_UpdateSessionRssi(void)
+{
+    if (!gSessionActive || (gSessionFlags & RXTX_LOG_FLAG_TX) != 0)
+        return;
+
+    const int16_t rssiDbm =
+        BK4819_GetRSSI_dBm()
+        + dBmCorrTable[gRxVfo->Band];
+    const uint8_t sMeter = rssiDbm >= -93
+        ? (uint8_t)(9u + MIN((uint8_t)(rssiDbm + 93), 40u))
+        : (rssiDbm < -141 ? 0 : (uint8_t)((rssiDbm + 147) / 6));
+
+    if (gSessionSMeter == RXTX_LOG_SMETER_UNKNOWN || sMeter > gSessionSMeter)
+        gSessionSMeter = sMeter;
 }
 
 static uint32_t RXTX_LOG_SlotToAddress(uint16_t slot)
@@ -633,6 +654,7 @@ static void RXTX_LOG_WriteSessionMarker(void)
     entry.sequence = gNextSequence++;
     entry.channel  = RXTX_LOG_CHANNEL_NONE;
     entry.flags    = RXTX_LOG_FLAG_SESSION;
+    entry.sMeter   = RXTX_LOG_SMETER_UNKNOWN;
 
     RXTX_LOG_WriteEntry(&entry);
     RXTX_LOG_InvalidateViewCache();
@@ -686,6 +708,8 @@ static void RXTX_LOG_CaptureSession(uint8_t flags, const VFO_Info_t *vfo)
     gSessionFrequency  = frequency;
     gSessionChannel    = channel;
     gSessionTicks500ms = 0;
+    gSessionSMeter     = RXTX_LOG_SMETER_UNKNOWN;
+    RXTX_LOG_UpdateSessionRssi();
 }
 
 void RXTX_LOG_Init(void)
@@ -700,9 +724,11 @@ void RXTX_LOG_Init(void)
     gLogCursor        = 0;
     gLogFilter        = RXTX_LOG_FILTER_ALL;
     gSessionActive    = false;
+    gSessionSMeter    = RXTX_LOG_SMETER_UNKNOWN;
     gClearActive      = false;
     gClearSector      = 0;
     gMenuClearHandled = false;
+    gLogShowRssi      = false;
     gLogHasTraffic    = false;
     gNextFlashAddress = RXTX_LOG_FLASH_BASE;
     RXTX_LOG_InvalidateViewCache();
@@ -774,8 +800,11 @@ void RXTX_LOG_EndActive(void)
 
     if (gClearActive) {
         gSessionActive = false;
+        gSessionSMeter = RXTX_LOG_SMETER_UNKNOWN;
         return;
     }
+
+    RXTX_LOG_UpdateSessionRssi();
 
     RXTX_LogEntry_t entry;
     memset(&entry, 0, sizeof(entry));
@@ -786,6 +815,7 @@ void RXTX_LOG_EndActive(void)
     entry.durationSeconds = (gSessionTicks500ms + 1u) / 2u;
     entry.channel         = gSessionChannel;
     entry.flags           = gSessionFlags;
+    entry.sMeter          = gSessionSMeter;
 
     if (entry.durationSeconds == 0)
         entry.durationSeconds = 1;
@@ -795,12 +825,16 @@ void RXTX_LOG_EndActive(void)
     RXTX_LOG_InvalidateViewCache();
 
     gSessionActive = false;
+    gSessionSMeter = RXTX_LOG_SMETER_UNKNOWN;
 }
 
 void RXTX_LOG_Tick500ms(void)
 {
-    if (gSessionActive && gSessionTicks500ms < 0xFFFEu)
-        gSessionTicks500ms++;
+    if (gSessionActive) {
+        RXTX_LOG_UpdateSessionRssi();
+        if (gSessionTicks500ms < 0xFFFEu)
+            gSessionTicks500ms++;
+    }
 }
 
 void RXTX_LOG_Task10ms(void)
@@ -820,6 +854,7 @@ void RXTX_LOG_Task10ms(void)
 void ACTION_RxTxLog(void)
 {
     gLogCursor = 0;
+    gLogShowRssi = false;
     RXTX_LOG_InvalidateViewCache();
     gUpdateStatus = true;
     GUI_SelectNextDisplay(DISPLAY_RXTX_LOG);
@@ -925,6 +960,13 @@ void RXTX_LOG_ProcessKeys(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
         }
         break;
 
+    case KEY_STAR:
+        if (bKeyPressed && !bKeyHeld) {
+            gLogShowRssi = !gLogShowRssi;
+            gUpdateDisplay = true;
+        }
+        break;
+
     case KEY_EXIT:
         gRequestDisplayScreen = DISPLAY_MAIN;
         gUpdateStatus = true;
@@ -953,6 +995,14 @@ static void RXTX_LOG_FormatTitle(const RXTX_LogEntry_t *entry, char *buffer)
         RXTX_LOG_FormatFrequency(entry->frequency, buffer);
 }
 
+static void RXTX_LOG_FormatSMeter(uint8_t sMeter, char *buffer)
+{
+    if (sMeter > 9)
+        sprintf(buffer, "S9+%u", sMeter - 9u);
+    else
+        sprintf(buffer, "S%u", sMeter);
+}
+
 static void RXTX_LOG_DrawIndexBadge(uint16_t indexFromNewest, uint8_t line)
 {
     char label[4];
@@ -977,7 +1027,7 @@ static void RXTX_LOG_ShowEmpty(bool showMessage)
 
 void UI_DisplayRxTxLog(void)
 {
-    char duration[8];
+    char detail[8];
     char title[16];
     RXTX_LogEntry_t entry;
 
@@ -1031,8 +1081,11 @@ void UI_DisplayRxTxLog(void)
 
         GUI_DisplaySmallest(isTx ? "TX" : "RX", 95, (uint8_t)((row * 8u) + 1u), false, true);
 
-        sprintf(duration, "%02u:%02u", entry.durationSeconds / 60u, entry.durationSeconds % 60u);
-        GUI_DisplaySmallestInverse(duration, 107, row, false, true, 127);
+        if (gLogShowRssi && !isTx)
+            RXTX_LOG_FormatSMeter(entry.sMeter, detail);
+        else
+            sprintf(detail, "%02u:%02u", entry.durationSeconds / 60u, entry.durationSeconds % 60u);
+        GUI_DisplaySmallestInverse(detail, 107, row, false, true, 127);
     }
 
     ST7565_BlitFullScreen();

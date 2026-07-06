@@ -17,6 +17,7 @@
 #include "external/printf/printf.h"
 #include "frequencies.h"
 #include "misc.h"
+#include "settings.h"
 #include "ui/helper.h"
 #include "ui/ui.h"
 
@@ -33,7 +34,7 @@
 #define RXTX_LOG_ENTRY_COMMIT        0xA5u
 #define RXTX_LOG_CHANNEL_NONE        0xFFFFu
 #define RXTX_LOG_FLAG_TX             (1u << 0)
-#define RXTX_LOG_FLAG_NAMED          (1u << 1)
+// (1u << 1) was FLAG_NAMED, retired: names are resolved from the channel.
 #define RXTX_LOG_FLAG_MONITOR        (1u << 2)
 #define RXTX_LOG_FLAG_SESSION        (1u << 3)
 #define RXTX_LOG_FILTER_ALL          0u
@@ -47,17 +48,20 @@ typedef struct __attribute__((packed)) {
     uint16_t durationSeconds;
     uint16_t channel;
     uint8_t  flags;
-    char     name[RXTX_LOG_NAME_LEN];
-    uint8_t  reserved[3];
+    uint8_t  reserved[13];
     uint8_t  crc;
     uint8_t  commit;
 } RXTX_LogFlashEntry_t;
 
 static_assert(sizeof(RXTX_LogFlashEntry_t) == 32);
 static_assert(RXTX_LOG_VIEW_ANCHOR_COUNT <= 32);
-// RXTX_LogEntry_t (RAM) and RXTX_LogFlashEntry_t must stay byte-identical up
-// to the end of name[] so entries can be copied with a single memcpy.
-static_assert(offsetof(RXTX_LogEntry_t, name) == offsetof(RXTX_LogFlashEntry_t, name));
+
+#define RXTX_LOG_ENTRY_COPY_SIZE offsetof(RXTX_LogFlashEntry_t, reserved)
+
+// RXTX_LogEntry_t (RAM) and RXTX_LogFlashEntry_t must stay byte-identical for
+// the copied prefix.
+static_assert(RXTX_LOG_ENTRY_COPY_SIZE == offsetof(RXTX_LogEntry_t, flags) + sizeof(((RXTX_LogEntry_t *)0)->flags));
+static_assert(sizeof(RXTX_LogEntry_t) >= RXTX_LOG_ENTRY_COPY_SIZE);
 
 static RXTX_LogEntry_t gViewCache[RXTX_LOG_VIEW_CACHE_COUNT];
 static uint16_t        gViewCacheStart;
@@ -96,7 +100,6 @@ static uint8_t         gSessionFlags;
 static uint32_t        gSessionFrequency;
 static uint16_t        gSessionChannel;
 static uint16_t        gSessionTicks500ms;
-static char            gSessionName[RXTX_LOG_NAME_LEN + 1];
 
 static uint16_t        gLogCursor;
 static uint8_t         gLogFilter;
@@ -172,12 +175,6 @@ const char *RXTX_LOG_GetFilterName(void)
     static const char *const filterNames[] = {"ALL", "RX", "TX"};
 
     return filterNames[gLogFilter];
-}
-
-static void RXTX_LOG_CopyFromFlash(RXTX_LogEntry_t *dst, const RXTX_LogFlashEntry_t *src)
-{
-    memcpy(dst, src, offsetof(RXTX_LogFlashEntry_t, reserved));
-    dst->name[RXTX_LOG_NAME_LEN] = 0;
 }
 
 static uint32_t RXTX_LOG_SlotToAddress(uint16_t slot)
@@ -429,7 +426,7 @@ static void RXTX_LOG_StepViewCacheScan(void)
         }
 
         if (gViewCacheCount < RXTX_LOG_VIEW_CACHE_COUNT) {
-            RXTX_LOG_CopyFromFlash(&gViewCache[gViewCacheCount], &flashEntry);
+            memcpy(&gViewCache[gViewCacheCount], &flashEntry, RXTX_LOG_ENTRY_COPY_SIZE);
             gViewCacheCount++;
         } else {
             gViewCacheHasOlder = true;
@@ -619,7 +616,7 @@ static uint32_t RXTX_LOG_WriteEntry(const RXTX_LogEntry_t *src)
     uint8_t commit = RXTX_LOG_ENTRY_COMMIT;
 
     memset(&entry, 0xFF, sizeof(entry));
-    memcpy(&entry, src, offsetof(RXTX_LogFlashEntry_t, reserved));
+    memcpy(&entry, src, RXTX_LOG_ENTRY_COPY_SIZE);
     entry.crc = RXTX_LOG_Crc8(&entry, sizeof(entry) - 2);
 
     RXTX_LOG_PrepareNextSlot();
@@ -693,12 +690,6 @@ static void RXTX_LOG_CaptureSession(uint8_t flags, const VFO_Info_t *vfo)
     gSessionFrequency  = frequency;
     gSessionChannel    = channel;
     gSessionTicks500ms = 0;
-    // vfo->Name is already truncated/trimmed/null-terminated by its sole
-    // writer, SETTINGS_FetchChannelName (settings.c), so a plain copy is enough.
-    if (isMemoryChannel)
-        strcpy(gSessionName, vfo->Name);
-    else
-        gSessionName[0] = 0;
 }
 
 void RXTX_LOG_Init(void)
@@ -799,10 +790,6 @@ void RXTX_LOG_EndActive(void)
     entry.durationSeconds = (gSessionTicks500ms + 1u) / 2u;
     entry.channel         = gSessionChannel;
     entry.flags           = gSessionFlags;
-    strcpy(entry.name, gSessionName);
-
-    if (entry.name[0] != 0)
-        entry.flags |= RXTX_LOG_FLAG_NAMED;
 
     if (entry.durationSeconds == 0)
         entry.durationSeconds = 1;
@@ -961,11 +948,13 @@ static void RXTX_LOG_FormatFrequency(uint32_t frequency, char *buffer)
 
 static void RXTX_LOG_FormatTitle(const RXTX_LogEntry_t *entry, char *buffer)
 {
-    if ((entry->flags & RXTX_LOG_FLAG_NAMED) != 0) {
-        strcpy(buffer, entry->name);
-    } else {
+    buffer[0] = 0;
+
+    if (entry->channel != RXTX_LOG_CHANNEL_NONE)
+        SETTINGS_FetchChannelName(buffer, entry->channel);
+
+    if (buffer[0] == 0)
         RXTX_LOG_FormatFrequency(entry->frequency, buffer);
-    }
 }
 
 static void RXTX_LOG_DrawIndexBadge(uint16_t indexFromNewest, uint8_t line)

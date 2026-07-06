@@ -15,7 +15,6 @@
 #include "driver/py25q16.h"
 #include "driver/st7565.h"
 #include "external/printf/printf.h"
-#include "frequencies.h"
 #include "misc.h"
 #include "settings.h"
 #include "ui/helper.h"
@@ -610,7 +609,7 @@ static void RXTX_LOG_AdvanceFlashAddress(void)
         gNextFlashAddress = RXTX_LOG_FLASH_BASE;
 }
 
-static uint32_t RXTX_LOG_WriteEntry(const RXTX_LogEntry_t *src)
+static void RXTX_LOG_WriteEntry(const RXTX_LogEntry_t *src)
 {
     RXTX_LogFlashEntry_t entry;
     uint8_t commit = RXTX_LOG_ENTRY_COMMIT;
@@ -621,12 +620,9 @@ static uint32_t RXTX_LOG_WriteEntry(const RXTX_LogEntry_t *src)
 
     RXTX_LOG_PrepareNextSlot();
 
-    const uint32_t address = gNextFlashAddress;
     PY25Q16_WriteBuffer(gNextFlashAddress, &entry, sizeof(entry), false);
     PY25Q16_WriteBuffer(gNextFlashAddress + sizeof(entry) - 1u, &commit, 1, false);
     RXTX_LOG_AdvanceFlashAddress();
-
-    return address;
 }
 
 static void RXTX_LOG_WriteSessionMarker(void)

@@ -17,11 +17,6 @@
 
 #define RXTX_LOG_VISIBLE_COUNT 512
 
-typedef enum {
-    RXTX_LOG_DIR_RX = 0,
-    RXTX_LOG_DIR_TX = 1,
-} RXTX_LogDirection_t;
-
 // Field order mirrors RXTX_LogFlashEntry_t (rxtx_log.c) so both layouts
 // match byte-for-byte up to and including flags, copied in one pass.
 // The channel name is not stored: it is resolved from `channel` at display

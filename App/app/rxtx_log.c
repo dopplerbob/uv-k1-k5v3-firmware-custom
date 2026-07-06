@@ -1044,7 +1044,7 @@ void UI_DisplayRxTxLog(void)
         else
             UI_PrintStringSmallNormal(title, 17, 0, row);
 
-        GUI_DisplaySmallest(isTx ? "TX" : "RX", 96, (uint8_t)((row * 8u) + 1u), false, true);
+        GUI_DisplaySmallest(isTx ? "TX" : "RX", 95, (uint8_t)((row * 8u) + 1u), false, true);
 
         sprintf(duration, "%02u:%02u", entry.durationSeconds / 60u, entry.durationSeconds % 60u);
         GUI_DisplaySmallestInverse(duration, 107, row, false, true, 127);

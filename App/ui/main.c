@@ -1558,6 +1558,24 @@ void UI_DisplayMain(void)
             else
                 sprintf(String, "%.4s", INPUTBOX_GetAsciiAlignRight() + 4);  // show the input text
 
+            // CUSTOM: Automatically display active CTCSS or DCS code if regular scan stops on a frequency
+if (gScanPauseMode || gScanPauseCountdown > 0) {
+    char ToneString[16];
+    
+    // Check if the hardware chip currently registers a CTCSS sub-audible tone
+    if (gRxCodeType == CODE_TYPE_CONTINUOUS_TONE) {
+        uint16_t ctcssVal = CTCSS_Options[gRxCode];
+        sprintf(ToneString, "CTC:%u.%uHz", ctcssVal / 10, ctcssVal % 10);
+        UI_PrintString(ToneString, 2, 127, 5, 8); // Prints onto the screen text grid row 5
+    } 
+    // Check if the hardware chip currently registers a DCS sub-audible code
+    else if (gRxCodeType == CODE_TYPE_DIGITAL_CODE || gRxCodeType == CODE_TYPE_REVERSE_DIGITAL_CODE) {
+        uint16_t dcsVal = DCS_Options[gRxCode];
+        sprintf(ToneString, "DCS:D%03o%c", dcsVal, (gRxCodeType == CODE_TYPE_REVERSE_DIGITAL_CODE) ? 'I' : 'N');
+        UI_PrintString(ToneString, 2, 127, 5, 8);
+    }
+}
+    
             //if (gSetting_set_gui) {
                 UI_PrintStringSmallNormalInverse(String, x, 0, line + 1);
             /*

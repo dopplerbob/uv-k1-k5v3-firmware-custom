@@ -576,7 +576,7 @@ static void MAIN_Key_DIGITS(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
                 return;
             }
             
-            gKeyInputCountdown = key_input_timeout_500ms / (gInputBoxIndex >= totalDigits ? 16 : 3);
+            gKeyInputCountdown = key_input_timeout_500ms / (gInputBoxIndex >= totalDigits ? 16 : 1);
 
             if (gInputBoxIndex > totalDigits) {
                 gInputBoxIndex = totalDigits;

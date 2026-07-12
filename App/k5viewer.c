@@ -47,6 +47,9 @@ static bool wasConnected = false;
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
 static uint32_t previousRfLogSignature = 0;
 static bool rfLogSent = false;
+// Pagination bound of the history dump: rows with trafficSeq below this
+// value remain to be sent; HISTORY_START arms a new dump, 0 means done.
+static uint32_t rfLogHistoryBefore = RXTX_LOG_K5VIEWER_HISTORY_START;
 #endif
 
 // FNV-1a over one 8-byte chunk, folded to 16 bits
@@ -74,6 +77,7 @@ void K5VIEWER_ParseInput(void)
         hasConnectionPing = true;
         gUSB_K5ViewerEnabled = true;
     }
+
 }
 
 static void K5VIEWER_Send(const uint8_t *buf, uint16_t len)
@@ -92,6 +96,7 @@ enum {
     K5VIEWER_MARKER_BASE = 0xF0,
     K5VIEWER_TYPE_DIFF = 0x02,
     K5VIEWER_TYPE_RXTX_LOG = 0x05,
+    K5VIEWER_TYPE_RXTX_LOG_HISTORY = 0x06,
     K5VIEWER_FLAG_DEEP_SLEEP = 1 << 0,
     K5VIEWER_FLAG_LED_RED = 1 << 1,
     K5VIEWER_FLAG_LED_GREEN = 1 << 2,
@@ -118,10 +123,30 @@ static uint8_t K5VIEWER_StateFlags(void)
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
 static bool K5VIEWER_HasPendingRfLogUpdate(void)
 {
+    if ((gSerialViewerFeatures & SERIAL_VIEWER_FEATURE_RF_LOG_RESTART) != 0) {
+        gSerialViewerFeatures &= ~SERIAL_VIEWER_FEATURE_RF_LOG_RESTART;
+        rfLogSent = false;
+        rfLogHistoryBefore = RXTX_LOG_K5VIEWER_HISTORY_START;
+    }
+
     if ((gSerialViewerFeatures & SERIAL_VIEWER_FEATURE_RF_LOG) == 0)
         return false;
 
     return !rfLogSent || RXTX_LOG_K5ViewerSignature() != previousRfLogSignature;
+}
+
+static void K5VIEWER_SendRfLogFrameHeader(uint8_t type, uint16_t len)
+{
+    uint8_t header[5] = {0xAA, 0x55, type, (uint8_t)(len >> 8), (uint8_t)len};
+
+    K5VIEWER_Send(header, sizeof(header));
+}
+
+static void K5VIEWER_SendRfLogFrameEnd(void)
+{
+    const uint8_t end = 0x0A;
+
+    K5VIEWER_Send(&end, 1);
 }
 
 static void K5VIEWER_SendRfLog(void)
@@ -132,18 +157,23 @@ static void K5VIEWER_SendRfLog(void)
     previousRfLogSignature = RXTX_LOG_K5ViewerSignature();
     rfLogSent = true;
 
-    const uint16_t len = RXTX_LOG_K5VIEWER_PACKET_SIZE;
-    uint8_t header[5] = {
-        0xAA, 0x55, K5VIEWER_TYPE_RXTX_LOG,
-        (uint8_t)(len >> 8),
-        (uint8_t)(len & 0xFF)
-    };
-
-    K5VIEWER_Send(header, 5);
+    K5VIEWER_SendRfLogFrameHeader(K5VIEWER_TYPE_RXTX_LOG, RXTX_LOG_K5VIEWER_PACKET_SIZE);
     RXTX_LOG_SendK5ViewerPacket(K5VIEWER_Send);
+    K5VIEWER_SendRfLogFrameEnd();
+}
 
-    uint8_t end = 0x0A;
-    K5VIEWER_Send(&end, 1);
+static bool K5VIEWER_HasPendingRfLogHistory(void)
+{
+    return (gSerialViewerFeatures & SERIAL_VIEWER_FEATURE_RF_LOG_HISTORY) != 0 &&
+           rfLogHistoryBefore != 0;
+}
+
+static void K5VIEWER_SendRfLogHistory(void)
+{
+    K5VIEWER_SendRfLogFrameHeader(K5VIEWER_TYPE_RXTX_LOG_HISTORY,
+                                  RXTX_LOG_K5VIEWER_HISTORY_PACKET_SIZE);
+    rfLogHistoryBefore = RXTX_LOG_SendK5ViewerHistoryPage(rfLogHistoryBefore, K5VIEWER_Send);
+    K5VIEWER_SendRfLogFrameEnd();
 }
 #endif
 
@@ -154,6 +184,8 @@ bool K5VIEWER_HasPendingStateChange(void)
 
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
     if (K5VIEWER_HasPendingRfLogUpdate())
+        return true;
+    if (K5VIEWER_HasPendingRfLogHistory())
         return true;
 #endif
 
@@ -195,6 +227,7 @@ void K5VIEWER_Update(bool force)
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
             gSerialViewerFeatures = 0;
             rfLogSent = false;
+            rfLogHistoryBefore = RXTX_LOG_K5VIEWER_HISTORY_START;
 #endif
             return;
         }
@@ -211,8 +244,10 @@ void K5VIEWER_Update(bool force)
     const bool stateChanged = (stateFlags != previousStateFlags);
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
     const bool rfLogPending = K5VIEWER_HasPendingRfLogUpdate();
+    const bool rfLogHistoryPending = K5VIEWER_HasPendingRfLogHistory();
 #else
     const bool rfLogPending = false;
+    const bool rfLogHistoryPending = false;
 #endif
 
     // ==== FIRST PASS: Count changed chunks ====
@@ -234,7 +269,7 @@ void K5VIEWER_Update(bool force)
 
     forcedBlock = (forcedBlock + 1) % 128;
 
-    if (deltaLen == 0 && !stateChanged && !rfLogPending)
+    if (deltaLen == 0 && !stateChanged && !rfLogPending && !rfLogHistoryPending)
         return;
 
     // Skip transmission if a key is currently pressed
@@ -287,6 +322,8 @@ void K5VIEWER_Update(bool force)
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
     if (rfLogPending)
         K5VIEWER_SendRfLog();
+    if (rfLogHistoryPending)
+        K5VIEWER_SendRfLogHistory();
 #endif
 
     previousStateFlags = stateFlags;

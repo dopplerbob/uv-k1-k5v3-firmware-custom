@@ -36,6 +36,8 @@ typedef struct {
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
 #define RXTX_LOG_K5VIEWER_VERSION 2u
 #define RXTX_LOG_K5VIEWER_ROW_COUNT 64u
+#define RXTX_LOG_K5VIEWER_HISTORY_ROW_COUNT 64u
+#define RXTX_LOG_K5VIEWER_HISTORY_START 0xFFFFFFFFu
 #define RXTX_LOG_K5VIEWER_NAME_LENGTH 10u
 #define RXTX_LOG_K5VIEWER_STATUS_ACTIVE      (1u << 0)
 #define RXTX_LOG_K5VIEWER_STATUS_HAS_TRAFFIC (1u << 1)
@@ -57,9 +59,14 @@ typedef struct __attribute__((packed)) {
 // zero-padded past the last valid row. The packet is streamed row by row
 // and never built whole in RAM, so only its size is defined here.
 #define RXTX_LOG_K5VIEWER_PACKET_SIZE (4u + ((RXTX_LOG_K5VIEWER_ROW_COUNT + 1u) * sizeof(RXTX_LogK5ViewerRow_t)))
+#define RXTX_LOG_K5VIEWER_HISTORY_PACKET_SIZE (RXTX_LOG_K5VIEWER_HISTORY_ROW_COUNT * sizeof(RXTX_LogK5ViewerRow_t))
 
 uint32_t RXTX_LOG_K5ViewerSignature(void);
 void RXTX_LOG_SendK5ViewerPacket(void (*send)(const uint8_t *data, uint16_t size));
+// Sends the page of history rows below `beforeSeq` (HISTORY_START begins
+// a dump below the live packet's coverage) and returns the bound for the
+// next page, 0 once the visible history is exhausted.
+uint32_t RXTX_LOG_SendK5ViewerHistoryPage(uint32_t beforeSeq, void (*send)(const uint8_t *data, uint16_t size));
 #endif
 
 void RXTX_LOG_Init(void);

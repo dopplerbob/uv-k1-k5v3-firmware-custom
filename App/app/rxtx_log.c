@@ -88,6 +88,7 @@ static_assert(sizeof(RXTX_LogEntry_t) >= RXTX_LOG_ENTRY_COPY_SIZE);
 // instead of the viewer.
 static_assert(sizeof(RXTX_LogK5ViewerRow_t) == 25);
 static_assert(RXTX_LOG_K5VIEWER_PACKET_SIZE == 1629);
+static_assert(RXTX_LOG_K5VIEWER_HISTORY_PACKET_SIZE == 1600);
 #endif
 
 static RXTX_LogEntry_t gViewCache[RXTX_LOG_VIEW_CACHE_COUNT];
@@ -796,6 +797,57 @@ static void RXTX_LOG_CopyK5ViewerRow(RXTX_LogK5ViewerRow_t *dst, const RXTX_LogF
     RXTX_LOG_SetK5ViewerChannelName(dst, src->channel);
 }
 
+// Send up to `count` rows whose trafficSeq is below `beforeSeq`, newest
+// first, scanning the ring backwards from the write head and zero-padding
+// past the last valid entry. Returns the trafficSeq of the oldest row
+// sent when more visible history remains below it, 0 otherwise: feeding
+// that value back as the next `beforeSeq` pages through the whole
+// visible history without duplicating or skipping rows, even while new
+// traffic keeps landing between pages (new entries sit above the bound).
+static uint32_t RXTX_LOG_SendK5ViewerRows(uint32_t beforeSeq, uint8_t count,
+                                          void (*send)(const uint8_t *data, uint16_t size))
+{
+    RXTX_LogK5ViewerRow_t row;
+    uint8_t rowsSent = 0;
+    uint32_t nextBefore = 0;
+
+    if (gLogHasTraffic && beforeSeq > 0) {
+        uint16_t slot = RXTX_LOG_AddressToSlot(gNextFlashAddress);
+
+        for (uint16_t scanned = 0; scanned < RXTX_LOG_SLOT_COUNT && rowsSent < count; scanned++) {
+            RXTX_LogFlashEntry_t flashEntry;
+
+            slot = RXTX_LOG_PreviousSlot(slot);
+            PY25Q16_ReadBuffer(RXTX_LOG_SlotToAddress(slot), &flashEntry, sizeof(flashEntry));
+
+            if (RXTX_LOG_IsBlankFlashEntry(&flashEntry))
+                break;
+            if (!RXTX_LOG_IsValidFlashEntry(&flashEntry) || !RXTX_LOG_IsTrafficFlags(flashEntry.flags))
+                continue;
+            if ((gNextTrafficSequence - 1u - flashEntry.trafficSeq) >= RXTX_LOG_VISIBLE_COUNT)
+                break;
+            if (flashEntry.trafficSeq >= beforeSeq)
+                continue;
+
+            RXTX_LOG_CopyK5ViewerRow(&row, &flashEntry);
+            send((const uint8_t *)&row, sizeof(row));
+            rowsSent++;
+            nextBefore = flashEntry.trafficSeq;
+        }
+    }
+
+    // A short page means the log ran out; a full page ending on the
+    // oldest visible entry is equally final.
+    if (rowsSent < count || (gNextTrafficSequence - nextBefore) >= RXTX_LOG_VISIBLE_COUNT)
+        nextBefore = 0;
+
+    memset(&row, 0, sizeof(row));
+    while (rowsSent++ < count)
+        send((const uint8_t *)&row, sizeof(row));
+
+    return nextBefore;
+}
+
 // Stream the whole packet through `send` without ever holding it in RAM:
 // peak stack stays at one row plus one flash entry. The row area is always
 // full-length; rowCount is not known before scanning, so the header
@@ -804,7 +856,6 @@ static void RXTX_LOG_CopyK5ViewerRow(RXTX_LogK5ViewerRow_t *dst, const RXTX_LogF
 void RXTX_LOG_SendK5ViewerPacket(void (*send)(const uint8_t *data, uint16_t size))
 {
     RXTX_LogK5ViewerRow_t row;
-    uint8_t rowsSent = 0;
 
     uint8_t header[4] = {RXTX_LOG_K5VIEWER_VERSION, 0, RXTX_LOG_K5VIEWER_ROW_COUNT, 0};
     if (gSessionActive)
@@ -824,34 +875,20 @@ void RXTX_LOG_SendK5ViewerPacket(void (*send)(const uint8_t *data, uint16_t size
     row.battVolt        = gSessionBattVolt;
     RXTX_LOG_SetK5ViewerChannelName(&row, gSessionChannel);
     send((const uint8_t *)&row, sizeof(row));
+    RXTX_LOG_SendK5ViewerRows(gNextTrafficSequence, RXTX_LOG_K5VIEWER_ROW_COUNT, send);
+}
 
-    if (gLogHasTraffic) {
-        uint16_t slot = RXTX_LOG_AddressToSlot(gNextFlashAddress);
-        for (uint16_t scanned = 0;
-             scanned < RXTX_LOG_SLOT_COUNT && rowsSent < RXTX_LOG_K5VIEWER_ROW_COUNT;
-             scanned++)
-        {
-            RXTX_LogFlashEntry_t flashEntry;
+uint32_t RXTX_LOG_SendK5ViewerHistoryPage(uint32_t beforeSeq, void (*send)(const uint8_t *data, uint16_t size))
+{
+    // First page of a dump: start right below the rows the live packet
+    // already covers. A log shorter than the live packet leaves nothing
+    // to dump (the subtraction would wrap).
+    if (beforeSeq == RXTX_LOG_K5VIEWER_HISTORY_START)
+        beforeSeq = gNextTrafficSequence > RXTX_LOG_K5VIEWER_ROW_COUNT
+                        ? gNextTrafficSequence - RXTX_LOG_K5VIEWER_ROW_COUNT
+                        : 0;
 
-            slot = RXTX_LOG_PreviousSlot(slot);
-            PY25Q16_ReadBuffer(RXTX_LOG_SlotToAddress(slot), &flashEntry, sizeof(flashEntry));
-
-            if (RXTX_LOG_IsBlankFlashEntry(&flashEntry))
-                break;
-
-            if (!RXTX_LOG_IsValidFlashEntry(&flashEntry) ||
-                !RXTX_LOG_IsTrafficFlags(flashEntry.flags))
-                continue;
-
-            RXTX_LOG_CopyK5ViewerRow(&row, &flashEntry);
-            send((const uint8_t *)&row, sizeof(row));
-            rowsSent++;
-        }
-    }
-
-    memset(&row, 0, sizeof(row));
-    for (; rowsSent < RXTX_LOG_K5VIEWER_ROW_COUNT; rowsSent++)
-        send((const uint8_t *)&row, sizeof(row));
+    return RXTX_LOG_SendK5ViewerRows(beforeSeq, RXTX_LOG_K5VIEWER_HISTORY_ROW_COUNT, send);
 }
 #endif
 

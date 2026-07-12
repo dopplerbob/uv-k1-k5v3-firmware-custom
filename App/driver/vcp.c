@@ -50,6 +50,8 @@ bool VCP_K5ViewerPing(void)
     //   Feature keepalive (ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER builds only):
     //                    0x55 0xAA 0x05 <flags> → viewer alive, extensions enabled
     //                    flags bit 0 = RF log stream
+    //                    flags bit 1 = paged RF log history
+    //                    flags bit 7 = restart RF log synchronization
     //   Short key press: 0xAA 0x55 0x03 <key>   → inject short press
     //   Long key press:  0xAA 0x55 0x04 <key>   → inject long press
     //

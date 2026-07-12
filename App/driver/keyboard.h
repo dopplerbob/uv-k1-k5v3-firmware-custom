@@ -70,6 +70,8 @@ extern volatile KEY_Code_t gKeyFromSerial;
 
 #ifdef ENABLE_FEAT_F4HWN_RXTX_LOG_K5VIEWER
 #define SERIAL_VIEWER_FEATURE_RF_LOG 0x01u
+#define SERIAL_VIEWER_FEATURE_RF_LOG_HISTORY 0x02u
+#define SERIAL_VIEWER_FEATURE_RF_LOG_RESTART 0x80u
 
 // Extension flags announced by the viewer's feature keepalive.
 extern volatile uint8_t    gSerialViewerFeatures;

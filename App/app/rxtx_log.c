@@ -702,6 +702,9 @@ static void RXTX_LOG_WriteSessionMarker(void)
     RXTX_LogEntry_t entry;
 
     memset(&entry, 0, sizeof(entry));
+    // Markers take a rank in the traffic sequence so the K5Viewer stream
+    // can order and page them along with the RX/TX rows they separate.
+    entry.trafficSeq = gNextTrafficSequence++;
     entry.channel  = RXTX_LOG_CHANNEL_NONE;
     entry.flags    = RXTX_LOG_FLAG_SESSION;
     entry.sMeter   = RXTX_LOG_SMETER_UNKNOWN;
@@ -822,10 +825,17 @@ static uint32_t RXTX_LOG_SendK5ViewerRows(uint32_t beforeSeq, uint8_t count,
 
             if (RXTX_LOG_IsBlankFlashEntry(&flashEntry))
                 break;
-            if (!RXTX_LOG_IsValidFlashEntry(&flashEntry) || !RXTX_LOG_IsTrafficFlags(flashEntry.flags))
+            if (!RXTX_LOG_IsValidFlashEntry(&flashEntry))
                 continue;
-            if ((gNextTrafficSequence - 1u - flashEntry.trafficSeq) >= RXTX_LOG_VISIBLE_COUNT)
-                break;
+            if ((gNextTrafficSequence - 1u - flashEntry.trafficSeq) >= RXTX_LOG_VISIBLE_COUNT) {
+                // The backwards scan only guarantees decreasing ranks for
+                // traffic rows: a session marker written before markers
+                // carried a rank reads as 0, skip it without ending the
+                // scan or it would truncate the remaining history.
+                if (RXTX_LOG_IsTrafficFlags(flashEntry.flags))
+                    break;
+                continue;
+            }
             if (flashEntry.trafficSeq >= beforeSeq)
                 continue;
 
@@ -951,12 +961,16 @@ void RXTX_LOG_Init(void)
         if (!RXTX_LOG_IsValidFlashEntry(&flashEntry))
             continue;
 
-        if (RXTX_LOG_IsTrafficFlags(flashEntry.flags)) {
+        if (RXTX_LOG_IsTrafficFlags(flashEntry.flags))
             gLogHasTraffic = true;
-            if (!foundTraffic || flashEntry.trafficSeq > maxTrafficSeq) {
-                foundTraffic = true;
-                maxTrafficSeq = flashEntry.trafficSeq;
-            }
+
+        // Session markers consume a trafficSeq too: restore the counter
+        // from every ranked entry, or a reboot would hand the rank the
+        // boot marker just took to the next traffic entry. Markers written
+        // before they carried a rank read as 0 and never win.
+        if (!foundTraffic || flashEntry.trafficSeq > maxTrafficSeq) {
+            foundTraffic = true;
+            maxTrafficSeq = flashEntry.trafficSeq;
         }
 
         if (!found || flashEntry.sequence > maxSequence) {
